@@ -7,7 +7,16 @@
 #include <map>
 #include <functional>
 #include "map11.h"
-
+#include <fstream>
+#include <string>
+#include <sstream>
+#include <string>
+#include <cstdio>      // _popen, _pclose
+#include <memory>      // unique_ptr
+#include <array>       // array
+     // ifstream
+#include <string>      // string
+#include <iostream>    // cout
 using namespace std;
 
 /* 设置控制台颜色 */
@@ -508,49 +517,298 @@ void Plot::handleShop() {
     SetConsoleColor(7); // 恢复为白色
 }
 
-void Plot::handleDock() {
-    int gold = character->getGold(); // 获取当前金币
+// 辅助函数：执行命令并返回标准输出+标准错误的内容
+std::string execCommand(const std::string& cmd) {
+    std::array<char, 128> buffer;
+    std::string result;
+#ifdef _WIN32
+    std::unique_ptr<FILE, decltype(&_pclose)> pipe(_popen(cmd.c_str(), "r"), _pclose);
+#else
+    std::unique_ptr<FILE, decltype(&pclose)> pipe(popen(cmd.c_str(), "r"), pclose);
+#endif
+    if (!pipe) {
+        return "ERROR: Failed to run command";
+    }
+    while (fgets(buffer.data(), buffer.size(), pipe.get()) != nullptr) {
+        result += buffer.data();
+    }
+    return result;
+}
 
-    SetConsoleColor(8); // 灰色
-    // 打印码头的描述
-    PrintWithDelay("在码头，你看到许多货物堆积在一起，工人们忙碌地搬运着。\n", 30);
-    SetConsoleColor(7); // 白色
-    PrintWithDelay("码头工人：", 30);
-    SetConsoleColor(12); // 红色
-    // 打印码头工人的对话
-    PrintWithDelay("“客官，有没有兴趣帮忙运货？帮忙的话可以赚些钱。”\n", 30);
-    SetConsoleColor(10); // 绿色
-    // 打印选项
-    cout << "1.是              2.否" << endl;
-    SetConsoleColor(7); // 恢复为白色
-    int f = 0;
-    cin >> f; // 获取用户输入
-    while (f != 1 && f != 2) {
-        // 输入错误提示
-        cout << "输入错误，请重新输入" << endl;
-        SetConsoleColor(10); // 绿色
-        cout << "1.是              2.否" << endl;
-        SetConsoleColor(7); // 恢复为白色
-        cin >> f; // 重新获取用户输入
+void Plot::handleDock() {
+    // 进入码头时重置对话状态，确保智能体先发言
+    std::remove("npc_state.txt");
+    std::remove("task_info.txt");
+
+    SetConsoleColor(8);
+    SetConsoleColor(7);
+
+    // 先触发智能体初始发言
+    {
+        std::ofstream out("temp_input.txt");
+        out << "" << std::endl;
+        out.close();
+        std::remove("temp_output.txt");
+
+        bool pythonOk = false;
+        bool scriptExists = false;
+        std::string pyCheck = execCommand("python --version 2>&1");
+        if (pyCheck.find("Python") != std::string::npos) {
+            pythonOk = true;
+        } else {
+            std::cout << "[调试] 未找到 Python 解释器！请确保 Python 已安装并添加到 PATH。\n";
+        }
+
+        std::ifstream scriptFile("npc_dock.py");
+        if (scriptFile.good()) {
+            scriptExists = true;
+            scriptFile.close();
+        } else {
+            std::cout << "[调试] 未找到脚本文件 npc_dock.py！\n";
+        }
+
+        std::string response;
+        if (!pythonOk) {
+            response = "抱歉，无法运行 AI（Python 不可用）。";
+        } else if (!scriptExists) {
+            response = "抱歉，找不到 AI 脚本文件。";
+        } else {
+            std::string output = execCommand("python npc_dock.py 2>&1");
+            if (!output.empty()) {
+                std::cout << "[调试] 脚本运行出现问题，错误信息:\n" << output;
+                response = "抱歉，AI 脚本运行出错。";
+            }
+        }
+
+        if (response.empty()) {
+            std::ifstream in("temp_output.txt");
+            if (in.is_open()) {
+                std::ostringstream ss;
+                ss << in.rdbuf();
+                response = ss.str();
+                in.close();
+                if (response.empty()) {
+                    response = "抱歉，我现在无法回应（输出为空）。";
+                }
+            } else {
+                response = "抱歉，无法打开输出文件。";
+            }
+        }
+
+        bool should_exit = false;
+        std::string action_str = "";
+        std::string actual_response = response;
+
+        // 先找 RESPONSE:
+        size_t resp_start = actual_response.find("RESPONSE:");
+        if (resp_start != std::string::npos) {
+            actual_response = actual_response.substr(resp_start + 9);
+        }
+
+        // 找 ACTION
+        size_t action_pos = actual_response.find("\nACTION:");
+        if (action_pos == std::string::npos) {
+            action_pos = actual_response.find("\naction:");
+        }
+        if (action_pos != std::string::npos) {
+            action_str = actual_response.substr(action_pos + 8);
+            actual_response = actual_response.substr(0, action_pos);
+        }
+
+        // 找 EXIT
+        size_t exit_pos = actual_response.find("\nEXIT");
+        if (exit_pos == std::string::npos) {
+            exit_pos = actual_response.find("\nexit");
+        }
+        if (exit_pos != std::string::npos) {
+            should_exit = true;
+            actual_response = actual_response.substr(0, exit_pos);
+        }
+
+        response = actual_response;
+
+        SetConsoleColor(12);
+        PrintWithDelay("码头负责人: " + response + "\n", 30);
+        SetConsoleColor(7);
+
+        if (!action_str.empty()) {
+            if (action_str.find("add_gold:") == 0) {
+                std::string gold_str = action_str.substr(9);
+                try {
+                    int add_gold = std::stoi(gold_str);
+                    int current_gold = character->getGold();
+                    character->setGold(current_gold + add_gold);
+                    SetConsoleColor(10);
+                    
+                    PrintWithDelay("盘缠 +" + std::to_string(add_gold) + "\n", 30);
+                    SetConsoleColor(7);
+                } catch (...) {
+                }
+            } 
+        }
+
+        if (should_exit) {
+            PrintWithDelay("你结束了与码头工人的对话，离开了码头。\n", 30);
+            return;
+        }
     }
-    if (f == 1) {
-        // 用户同意帮助
-        PrintWithDelay("你同意了，加入了运货的行列。\n", 30);
-        SetConsoleColor(10); // 绿色
-        PrintWithDelay("钱包+50\n", 30);
-        character->setGold(gold + 50); // 增加金币
-        SetConsoleColor(7); // 恢复为白色
+
+    // 吃掉可能遗留的回车，避免上一轮 cin >> 影响 getline
+    if (std::cin.peek() == '\n') {
+        std::cin.get();
     }
-    else if (f == 2) {
-        // 用户选择离开
-        PrintWithDelay("你离开了码头。\n", 30);
-        return;
+
+    while (true) {
+        std::string input;
+        std::cout << "你: ";
+        std::getline(std::cin, input);
+
+        if (input == "exit" || input == "离开") {
+            break;
+        }
+
+        // 写入用户输入
+        std::ofstream out("temp_input.txt");
+        out << input << std::endl;
+        out.close();
+
+        // 删除旧的输出文件
+        std::remove("temp_output.txt");
+
+        // ---- 开始调试：判断 Python 和脚本状态 ----
+        bool pythonOk = false;
+        bool scriptExists = false;
+
+        // 1. 检查 Python 解释器是否可用
+        std::string pyCheck = execCommand("python --version 2>&1");
+        if (pyCheck.find("Python") != std::string::npos) {
+            pythonOk = true;
+            //std::cout << "[调试] Python 环境正常: " << pyCheck;
+        } else {
+            std::cout << "[调试] 未找到 Python 解释器！请确保 Python 已安装并添加到 PATH。\n";
+        }
+
+        // 2. 检查脚本文件是否存在
+        std::ifstream scriptFile("npc_dock.py");
+        if (scriptFile.good()) {
+            scriptExists = true;
+            scriptFile.close();
+        } else {
+            std::cout << "[调试] 未找到脚本文件 npc_dock.py！\n";
+        }
+
+        // 3. 根据检查结果执行脚本
+        std::string response;
+        if (!pythonOk) {
+            response = "抱歉，无法运行 AI（Python 不可用）。";
+        } else if (!scriptExists) {
+            response = "抱歉，找不到 AI 脚本文件。";
+        } else {
+            // 执行脚本并捕获所有输出（包括错误）
+            std::string output = execCommand("python npc_dock.py 2>&1");
+            if (output.empty()) {
+                //std::cout << "[调试] 成功运行\n";
+            } else {
+                std::cout << "[调试] 脚本运行出现问题，错误信息:\n" << output;
+                response = "抱歉，AI 脚本运行出错。";
+            }
+        }
+
+        // 如果上面的检查已经给出了 response，则不再从 temp_output.txt 读取
+        // 否则尝试读取正常输出
+        if (response.empty()) {
+            std::ifstream in("temp_output.txt");
+            if (in.is_open()) {
+                std::ostringstream ss;
+                ss << in.rdbuf();
+                response = ss.str();
+                in.close();
+                if (response.empty()) {
+                    response = "抱歉，我现在无法回应（输出为空）。";
+                }
+            } else {
+                response = "抱歉，无法打开输出文件。";
+            }
+        }
+
+        // 解析response中的EXIT和ACTION
+        bool should_exit = false;
+        std::string action_str = "";
+        std::string actual_response = response;
+
+        // 先找 RESPONSE:
+        size_t resp_start = actual_response.find("RESPONSE:");
+        if (resp_start != std::string::npos) {
+            actual_response = actual_response.substr(resp_start + 9);
+        }
+
+        // 找 ACTION
+        size_t action_pos = actual_response.find("\nACTION:");
+        if (action_pos == std::string::npos) {
+            action_pos = actual_response.find("\naction:");
+        }
+        if (action_pos != std::string::npos) {
+            action_str = actual_response.substr(action_pos + 8);
+            actual_response = actual_response.substr(0, action_pos);
+        }
+
+        // 找 EXIT
+        size_t exit_pos = actual_response.find("\nEXIT");
+        if (exit_pos == std::string::npos) {
+            exit_pos = actual_response.find("\nexit");
+        }
+        if (exit_pos != std::string::npos) {
+            should_exit = true;
+            actual_response = actual_response.substr(0, exit_pos);
+        }
+
+        response = actual_response;
+
+        SetConsoleColor(12);
+        PrintWithDelay("NPC: " + response + "\n", 30);
+        SetConsoleColor(7);
+
+        // 执行action
+        if (!action_str.empty()) {
+            if (action_str.find("add_gold:") == 0) {
+                std::string gold_str = action_str.substr(9);
+                try {
+                    int add_gold = std::stoi(gold_str);
+                    int current_gold = character->getGold();
+                    character->setGold(current_gold + add_gold);
+                    SetConsoleColor(10);
+                    PrintWithDelay("盘缠 +" + std::to_string(add_gold) + "\n", 30);
+                    SetConsoleColor(7);
+                } catch (...) {
+                    // 忽略解析错误
+                }
+            } else if (action_str.find("add_hp:") == 0) {
+                std::string hp_str = action_str.substr(7);
+                try {
+                    int add_hp = std::stoi(hp_str);
+                    character->modifyHP(add_hp);
+                    SetConsoleColor(10);
+                    PrintWithDelay("体力 +" + std::to_string(add_hp) + "\n", 30);
+                    SetConsoleColor(7);
+                } catch (...) {
+                    // 忽略解析错误
+                }
+            }
+            // 可以扩展其他属性，如 add_exp 等，如果角色类支持
+        }
+
+        if (should_exit) {
+            break;
+        }
     }
+
+    PrintWithDelay("你结束了与码头工人的对话，离开了码头。\n", 30);
 }
 
 int Plot::handleBarracks() {
     if (character) {
         bool running = true;
+        int a = 0;
         while (running) {
             int currentHP = character->getHP(); // 获取当前HP
             int maxHP = character->getMaxHP(); // 获取最大HP
@@ -567,10 +825,8 @@ int Plot::handleBarracks() {
             cout << "        ";
             PrintWithDelay("2. 离开\n", 30);
             SetConsoleColor(7); // 恢复为白色
-
-            int choice;
-            cin >> choice; // 获取用户选择
-            return choice; // 返回用户选择的操作
+            cin >> a;// 获取用户选择
+            return a; // 返回用户选择的操作
         }
     }
     return 0; // 返回0表示没有选择任何操作
