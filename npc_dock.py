@@ -8,7 +8,7 @@ from langchain.messages import HumanMessage, SystemMessage
 
 llm = ChatOpenAI(
     openai_api_base="https://api.deepseek.com/v1",
-    openai_api_key=os.getenv("DEEPSEEK_API_KEY", "sk-0a69f5b6461d4a1788793a20103de3b5"),
+    openai_api_key=os.getenv("DEEPSEEK_API_KEY", "API_KEY"),
     model="deepseek-chat",
     temperature=0.7,
     max_tokens=300,
